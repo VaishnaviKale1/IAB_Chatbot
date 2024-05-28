@@ -1,14 +1,16 @@
-import pickle
 import time
+import pickle
 from flask import Flask, request, jsonify
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.llms import LlamaCpp
-from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain.memory import ConversationBufferMemory
-from langchain.chains import ConversationalRetrievalChain
-from langchain_community.document_loaders import WebBaseLoader
+from sklearn.metrics.pairwise import cosine_similarity
 from langchain.callbacks.manager import CallbackManager
+from langchain.chains import ConversationalRetrievalChain
+from sentence_transformers import SentenceTransformer, util
+from langchain_community.document_loaders import WebBaseLoader
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
 
 app = Flask(__name__)
@@ -62,6 +64,9 @@ def qa():
     user_question = request.json.get('question')
     if any(char.isdigit() for char in user_question) and any(op in user_question for op in ['+', '-', '*', '/', '%']):
         return jsonify({"answer": "I do not have any knowledge of mathematics. Please ask me a different question."})
+    
+    if not validate_answer_against_sources(response['answer'], urls):
+        return jsonify({"answer": "I cannot provide a relevant answer based on the provided documents."})
 
     response = conversation_chain.invoke({"question": user_question})
     time_taken = time.perf_counter() - start
@@ -110,6 +115,22 @@ def get_conversation_chain(vectordb):
                            return_source_documents=True))
     print("Conversational Chain created for the LLM using the vector store")
     return conversation_chain
+
+def validate_answer_against_sources(response_answer, urls):
+    model = SentenceTransformer('all-MiniLM-L6-v2')
+    similarity_threshold = 0.5
+    source_texts = prepare_docs(urls)  # Load and split documents from URLs
+    source_textss = [doc.page_content for doc in source_texts]
+
+    answer_embedding = model.encode(response_answer, convert_to_tensor=True)
+    source_embeddings = model.encode(source_textss, convert_to_tensor=True)
+
+    cosine_scores = util.pytorch_cos_sim(answer_embedding, source_embeddings)
+
+    if any(score.item() >= similarity_threshold for score in cosine_scores[0]):
+        return True
+
+    return False
 
 
 if __name__ == '__main__':
