@@ -18,7 +18,7 @@ callback_manager = CallbackManager([StreamingStdOutCallbackHandler()])
 template = """[INST]
 As an AI, provide accurate and relevant information based on the provided document. Your responses should adhere to the following guidelines:
 - Answer the question based on the provided documents.
-- Be direct and factual, limited to 50-100 words and 4-10 sentences. Begin your response without using introductory phrases like yes, no etc.
+- Be direct and factual, limited to 50-200 words and 10-20 sentences. Begin your response without using introductory phrases like yes, no etc.
 - Maintain an ethical and unbiased tone, avoiding harmful or offensive content.
 - If the document does not contain relevant information, state "I cannot provide an answer based on the provided document."
 - Avoid using confirmatory phrases like "Yes, you are correct" or any similar validation in your responses.
@@ -26,13 +26,12 @@ As an AI, provide accurate and relevant information based on the provided docume
 [/INST]
 """
 
+
 # Store the URLs and conversation chain in a pickle file
 def store_conversation_chain(urls, conversation_chain):
-    try:
-        with open("conversation_chain.pkl", "wb") as f:
-            pickle.dump((urls, conversation_chain), f)
-    except Exception as e:
-        print(f"Error storing conversation chain: {e}")
+    with open("conversation_chain.pkl", "wb") as f:
+        pickle.dump((urls, conversation_chain), f)
+
 
 # Load the URLs and conversation chain from the pickle file
 def load_conversation_chain():
@@ -42,9 +41,7 @@ def load_conversation_chain():
         return urls, conversation_chain
     except FileNotFoundError:
         return None, None
-    except Exception as e:
-        print(f"Error loading conversation chain: {e}")
-        return None, None
+
 
 # Endpoint to submit URLs
 @app.route('/submit_urls', methods=['POST'])
@@ -60,31 +57,53 @@ def submit_urls():
         print(f"Error submitting URLs: {e}")
         return jsonify({"error": "Error submitting URLs"}), 500
 
+
+def validate_answer_against_sources(response_answer, urls):
+    try:
+        model = SentenceTransformer('all-MiniLM-L6-v2')
+        similarity_threshold = 0.5
+        source_texts = prepare_docs(urls)  # Load and split documents from URLs
+        source_textss = [doc.page_content for doc in source_texts]
+
+        answer_embedding = model.encode(response_answer, convert_to_tensor=True)
+        source_embeddings = model.encode(source_textss, convert_to_tensor=True)
+
+        cosine_scores = util.pytorch_cos_sim(answer_embedding, source_embeddings)
+
+        if any(score.item() >= similarity_threshold for score in cosine_scores[0]):
+            return True
+
+        return False
+    except Exception as e:
+        print(f"Error in validating response: {e}")
+        return jsonify({"error": "Error in validating response"}), 500
+
+
 # Endpoint for question-answering
 @app.route('/qa', methods=['POST'])
 def qa():
     try:
         start = time.perf_counter()
         urls, conversation_chain = load_conversation_chain()
+        user_question = request.json.get('question')
+
         if urls is None or conversation_chain is None:
             return jsonify({"error": "URLs not submitted yet"}), 400
 
-        user_question = request.json.get('question')
-        response = conversation_chain.invoke({"question": user_question})
         if any(char.isdigit() for char in user_question) and any(op in user_question for op in ['+', '-', '*', '/', '%']):
             return jsonify({"answer": "I do not have any knowledge of mathematics. Please ask me a different question."})
+        response = conversation_chain.invoke({"question": user_question})
+        # Check the relevance of the response
 
         if not validate_answer_against_sources(response['answer'], urls):
             return jsonify({"answer": "I cannot provide a relevant answer based on the provided documents."})
-
-        response = conversation_chain.invoke({"question": user_question})
         time_taken = time.perf_counter() - start
-        print(f'Time taken -> {time.perf_counter() - start}')
 
         return jsonify({"answer": response['answer'], "timetaken": time_taken})
     except Exception as e:
-        print(f"Error in question-answering: {e}")
-        return jsonify({"error": "Error in question-answering"}), 500
+        print(f"Issue to process the query: {e}")
+        return jsonify({"error": "Issue to process the query"}), 500
+
 
 # Prepare the documents by loading them from the URLs and splitting them into chunks
 def prepare_docs(urls):
@@ -96,8 +115,9 @@ def prepare_docs(urls):
         split_docs = text_splitter.split_documents(data)
         return split_docs
     except Exception as e:
-        print(f"Error preparing documents: {e}")
-        return []
+        print(f"Error in preparing docs: {e}")
+        return jsonify({"error": "Error in preparing documents"}), 500
+
 
 # Ingest the documents into the vector store
 def ingest_into_vectordb(split_docs):
@@ -110,8 +130,9 @@ def ingest_into_vectordb(split_docs):
         db.save_local(DB_FAISS_PATH)
         return db
     except Exception as e:
-        print(f"Error ingesting documents into vector store: {e}")
-        return None
+        print(f"Error in storing in DB : {e}")
+        return jsonify({"error": "Error in storing in DB "}), 500
+
 
 # Create the conversation chain using the vector store
 def get_conversation_chain(vectordb):
@@ -137,28 +158,9 @@ def get_conversation_chain(vectordb):
         print("Conversational Chain created for the LLM using the vector store")
         return conversation_chain
     except Exception as e:
-        print(f"Error creating conversation chain: {e}")
-        return None
+        print(f"Error in loading the conversation chain: {e}")
+        return jsonify({"error": "Error in loading the conversation chain "}), 500
 
-def validate_answer_against_sources(response_answer, urls):
-    try:
-        model = SentenceTransformer('all-MiniLM-L6-v2')
-        similarity_threshold = 0.5
-        source_texts = prepare_docs(urls)  # Load and split documents from URLs
-        source_textss = [doc.page_content for doc in source_texts]
-
-        answer_embedding = model.encode(response_answer, convert_to_tensor=True)
-        source_embeddings = model.encode(source_textss, convert_to_tensor=True)
-
-        cosine_scores = util.pytorch_cos_sim(answer_embedding, source_embeddings)
-
-        if any(score.item() >= similarity_threshold for score in cosine_scores[0]):
-            return True
-
-        return False
-    except Exception as e:
-        print(f"Error validating answer against sources: {e}")
-        return False
 
 if __name__ == '__main__':
     app.run(debug=True)
